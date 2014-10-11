@@ -1,0 +1,58 @@
+
+# PC^2 "html" directory.
+# This is the directory where PC^2 generates the scoreboard HTML files
+pc2_dir: /usr/local/pc2/html
+
+
+# List of files that will be published by the script.
+# All these files have to be in pc2_dir
+scoreboard_files:
+- summary.html
+- sites.html
+- group1.html
+- group2.html
+- group3.html
+
+
+# Other files that will be copied along the scoreboard_files
+# When running the script with the --update option, these
+# files will only be copied once, not with every single
+# scoreboard update.
+#
+# NOTE: Not implemented yet
+other_files:
+- standings.css
+
+
+# Message to insert in the frozen scoreboard
+freeze_message: The scoreboard is frozen.
+
+
+# Hostname of the web server where the scoreboard will be published to
+# You must be able to SSH into this host with a password-less SSH key.
+web_server: contest-server.university.edu
+
+# Username to use when SSH'ing into web_server
+web_username: poucherw
+
+# Path in the web server where the scoreboard files will be copied into
+web_path: /var/www/contest/
+
+
+# NOTE: Options below not yet implemented
+
+# Hostname of the server that is running EWTeam.
+# You must be able to SSH into this host with a password-less SSH key.
+ewteam_server: contest-server.university.edu
+
+# Username to use when SSH'ing into ewteam_server
+ewteam_username: poucherw
+
+# Path in ewteam_server where EWTeam is installed. This directory
+# will contain the "Team" and "lib" subdirectories.
+ewteam_path: /var/www/contest/pc2team/
+
+# EWTeam URL
+# Note that this has to be the root URL, not the URL of the scoreboard.
+ewteam_scoreboard_url: https://contest-server.university.edu/pc2team/
+

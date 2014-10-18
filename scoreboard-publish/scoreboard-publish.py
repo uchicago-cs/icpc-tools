@@ -16,16 +16,16 @@ import subprocess
 import socket
 import time
 import re
+import urllib2
 
 try:
-    import requests
     import yaml
     import paramiko
 except ImportError, ie:
     print "Your system is missing a required software library to run this script."
     print "Try running the following:"
     print 
-    print "    pip install --user requests PyYAML paramiko"
+    print "    pip install --user PyYAML paramiko"
     print 
     exit(1)
 
@@ -72,6 +72,60 @@ def print_http_response(response):
     print
     pp(response.text)
 
+def connect_to_server(server, username, path):
+    ntries = 3
+    reconnect = 5
+
+    while ntries > 0:
+        success = True
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.load_system_host_keys()
+            ssh.set_missing_host_key_policy(paramiko.client.AutoAddPolicy())
+            ssh.connect(hostname=server, username=username)
+            sftp = ssh.open_sftp()
+        except paramiko.AuthenticationException, ae:
+            log("ERROR: Authentication error connection to %s" % server)
+            success = False
+        except paramiko.SSHException, sshe:
+            log("ERROR: SSH error when connecting to %s" % server)
+            success = False
+        except socket.error:
+            log("ERROR: Network error when connecting to %s" % server)
+            success = False
+
+        if not success:
+            ntries -= 1
+            if ntries == 0:
+                log("ERROR: Unable to connect to %s. Giving up." % server)
+                exit(1)
+            log("Trying to reconnect to %s in %i seconds (%i tries left)" % (server, reconnect, ntries))
+            time.sleep(reconnect)
+            reconnect = 2*reconnect
+        else:
+            break
+            
+    try:
+        stdin, stdout, stderr = ssh.exec_command('stat %s' % path)
+        so = stdout.read()
+        se = stderr.read()
+
+        if len(se) > 0:
+            print "ERROR: Error when trying to read remote web directory %s" % path
+            print
+            print "stderr: %s" % (se)
+            exit(1)
+    except paramiko.SSHException, sshe:
+        print "ERROR: SSH error when connecting to %s (couldn't stat remote directory)" % server
+        exit(1)        
+
+    try:
+        sftp.chdir(path)
+    except IOError, ioe:
+        print "ERROR: Could not set SFTP client to directory %s" % path
+        exit(1)
+
+    return ssh, sftp
 
 def load_config_file(config):
     if type(config) != dict:
@@ -103,43 +157,30 @@ def load_config_file(config):
             print "ERROR: Scoreboard file '%s' does not exist" + ff
             exit(1)
 
-    try:
-        ssh_web = paramiko.SSHClient()
-        ssh_web.load_system_host_keys()
-        ssh_web.set_missing_host_key_policy(paramiko.client.AutoAddPolicy())
-        ssh_web.connect(config["web_server"], username=config["web_username"])
-        sftp_web = ssh_web.open_sftp()
-    except paramiko.AuthenticationException, ae:
-        print "ERROR: Authentication error connection to %s" % config["web_server"]
-        exit(1)
-    except paramiko.SSHException, sshe:
-        print "ERROR: SSH error when connecting to %s" % config["web_server"]
-        exit(1)        
-    except socket.error:
-        print "ERROR: Network error when connecting to %s" % config["web_server"]
-        exit(1)        
+    ssh_web, sftp_web = connect_to_server(config["web_server"], config["web_username"], config["web_path"])
 
-    try:
-        stdin, stdout, stderr = ssh_web.exec_command('stat %s' % config["web_path"])
-        so = stdout.read()
-        se = stderr.read()
+    has_ewteam = True
+    for v in ("ewteam_server", "ewteam_username", "ewteam_path"):
+        if not config.has_key(v):
+            has_ewteam = False
+            break
 
-        if len(se) > 0:
-            print "ERROR: Error when trying to read remote web directory" % config["web_server"]
-            print
-            print "stderr: %s" % (se)
-            exit(1)
-    except SSHException, sshe:
-        print "ERROR: SSH error when connecting to %s (couldn't stat remote directory)" % config["web_server"]
-        exit(1)        
-
-    try:
-        sftp_web.chdir(config["web_path"])
-    except IOError, ioe:
-        print "ERROR: Could not set SFTP client to directory %s" % config["web_path"]
-        exit(1)        
+    if has_ewteam:
+        if config["ewteam_server"] == config["web_server"]:
+            ssh_ewteam = ssh_web
+            sftp_ewteam = ssh_ewteam.open_sftp()            
+            try:
+                sftp_ewteam.chdir(config["ewteam_path"])
+            except IOError, ioe:
+                print "ERROR: Could not set SFTP client to directory %s" % config["ewteam_path"]
+                exit(1)
+        else:
+            ssh_ewteam, sftp_ewteam = connect_to_server(config["ewteam_server"], config["ewteam_username"], config["ewteam_path"])
+    else:
+        ssh_ewteam = None
+        sftp_ewteam = None
         
-    return ssh_web, sftp_web, None, None
+    return ssh_web, sftp_web, ssh_ewteam, sftp_ewteam
 
 
 def generate_frozen_file(d, f, freeze_message):
@@ -193,6 +234,140 @@ def upload_scoreboard(sftp_client, files, freeze, freeze_message, suffix, chmod 
     log("Uploaded scoreboard")  
 
 
+def upload_scoreboard_every(sftp_client, files, suffix, freeze_at, interval):
+
+    last_modified = dict([ ( (d,f), 0.0 ) for (d,f) in scoreboard_files ])
+    chmod = True
+
+    while True:
+        # Have there been any changes to the scoreboard?
+        changed = False
+        for ( (d,f), mtime) in last_modified.items():
+            new_mtime = os.stat(d+"/"+f).st_mtime
+            if new_mtime > mtime:
+                changed = True
+            last_modified[(d,f)] = new_mtime
+
+        if changed:
+            upload_scoreboard(sftp_client = sftp_client,
+                              files = files,                     
+                              freeze = False,
+                              freeze_message = None,
+                              suffix = suffix,
+                              chmod = chmod)
+
+            # We only want to chmod the first time we upload
+            if chmod:
+                chmod = False
+        else:
+            log("Scoreboard hasn't changed. Not uploading")
+
+        if freeze_at is not None:
+            td = freeze_at - datetime.now()
+            tds = td.total_seconds()
+
+            if tds < 0:
+                break
+
+            if tds < (FREEZE_WARNING_MINUTES * 60):
+                log("ATTENTION: The scoreboard will be frozen in %s" % td_str(td))
+
+        time.sleep(interval)
+
+
+def freeze_ewteam(sftp, scoreboard_url, freeze_message):
+
+    scoreboard_file = "./Team/iScoreBoard.php"  
+    scoreboard_file_backup = "./Team/iScoreBoard.txt"
+
+    try:
+        sftp.stat(scoreboard_file)
+    except IOError, ioe:
+        log("EWTeam server doesn't seem to contain EWTeam (%s not found)" % (scoreboard_file))
+        return False
+
+    try:
+        sftp.stat(scoreboard_file_backup)
+        log("The EWTeam scoreboard is already frozen. You cannot re-freeze it.")
+        return False
+    except IOError, ioe:
+        pass
+
+
+    try:
+        backupf = sftp.open(scoreboard_file_backup, "w")
+        sftp.getfo(scoreboard_file, backupf)
+        backupf.close()
+    except Exception, e:
+        log("Could not create backup of scoreboard file")
+        return False
+
+    if scoreboard_url[-1] != "/":
+        scoreboard_url += "/"
+
+    scoreboard_url = scoreboard_url + "Team/iScoreBoard.php"
+
+    try:
+        sb = urllib2.urlopen(scoreboard_url)
+    except urllib2.HTTPError, he:
+        log("EWTeam scoreboard not found.")
+        log("%s produced error %s %s" % (scoreboard_url, he.code, he.msg))
+        return False
+    except Exception, e:
+        log("Unexpected exception accessing scoreboard.")
+        return False
+
+    frozen_text = "<p style='font: bold 18px Arial, Sans-serif; color: red'>%s</p>\r\n" % freeze_message
+    frozen_text += "<p style='font: 12px Arial, Sans-serif'>Scoreboard was frozen at %s (Central time)</p>" % now_str()
+
+    sb_src = sb.read()
+    sb_src = re.sub("body>\s*<table", "body>\r\n%s\r\n<table" % frozen_text, sb_src)
+
+
+    try:
+        sbf = sftp.open(scoreboard_file, "w")
+        sbf.write(sb_src)
+        sbf.close()
+    except Exception, e:
+        log("Could not write frozen scoreboard")
+        return False
+
+    log("Froze EWTeam scoreboard")  
+
+
+def thaw_ewteam(sftp):
+    scoreboard_file = "./Team/iScoreBoard.php"  
+    scoreboard_file_backup = "./Team/iScoreBoard.txt"
+
+    try:
+        sftp.stat(scoreboard_file)
+    except IOError, ioe:
+        log("EWTeam server doesn't seem to contain EWTeam (%s not found)" % (scoreboard_file))
+        return False
+
+    try:
+        sftp.stat(scoreboard_file_backup)
+    except IOError, ioe:
+        log("EWTeam server doesn't seem to contain a backup of the scoreboard PHP file (%s not found)" % (scoreboard_file))
+        return False
+
+    try:
+        sbf = sftp.open(scoreboard_file, "w")
+        sftp.getfo(scoreboard_file_backup, sbf)
+        sbf.close()
+    except Exception, e:
+        log("Could not restore backup of scoreboard file")
+        return False
+
+    try:
+        sftp.remove(scoreboard_file_backup)
+    except Exception, e:
+        log("Could not delete backup of scoreboard PHP")
+        return False
+
+
+    log("Thawed EWTeam scoreboard")  
+
 ### MAIN PROGRAM ###
 
 if __name__ == "__main__":
@@ -204,6 +379,7 @@ if __name__ == "__main__":
     parser.add_argument('--suffix', metavar='SUFFIX', type=str, default=None)
     parser.add_argument('--update', metavar='SECONDS', type=int, default=0)
     parser.add_argument('--freeze-at', metavar='DATE_TIME', type=str, default=None)
+    parser.add_argument('--freeze-suffix', metavar='SUFFIX', type=str, default=None)
     parser.add_argument('--verbose', action="store_true")
 
     args = parser.parse_args()
@@ -218,9 +394,11 @@ if __name__ == "__main__":
         if verbose: raise 
         exit(1)
 
-   # pp(config)
-
     ssh_web, sftp_web, ssh_ewteam, sftp_ewteam = load_config_file(config)
+
+    if args.thaw_ewteam and sftp_ewteam is None:
+        print "ERROR: --thaw-ewteam specified but no EWTeam server specified in configuration file"
+        exit(1)
 
     scoreboard_files = [(config["pc2_dir"], f) for f in config["scoreboard_files"]]
 
@@ -236,10 +414,12 @@ if __name__ == "__main__":
                           freeze_message = config["freeze_message"],
                           suffix = args.suffix,
                           chmod = True)
+        
+        if args.freeze and sftp_ewteam is not None:
+            freeze_ewteam(sftp_ewteam, config["ewteam_scoreboard_url"], config["freeze_message"])
 
         if args.thaw_ewteam:
-            # Thaw the EWTeam scoreboard
-            pass
+            thaw_ewteam(sftp_ewteam)
 
     elif args.update >= MIN_UPDATE_INTERVAL:
         if args.freeze:
@@ -269,43 +449,12 @@ if __name__ == "__main__":
         else:
             freeze_at = None
 
-        last_modified = dict([ ( (d,f), 0.0 ) for (d,f) in scoreboard_files ])
-        chmod = True
+        upload_scoreboard_every(sftp_client = sftp_web,
+                                files = scoreboard_files,
+                                suffix = args.suffix,
+                                freeze_at = freeze_at,
+                                interval = args.update)
 
-        while True:
-            # Have there been any changes to the scoreboard?
-            changed = False
-            for ( (d,f), mtime) in last_modified.items():
-                new_mtime = os.stat(d+"/"+f).st_mtime
-                if new_mtime > mtime:
-                    changed = True
-                last_modified[(d,f)] = new_mtime
-
-            if changed:
-                upload_scoreboard(sftp_client = sftp_web,
-                                  files = scoreboard_files,                     
-                                  freeze = False,
-                                  freeze_message = None,
-                                  suffix = args.suffix,
-                                  chmod = chmod)
-
-                # We only want to chmod the first time we upload
-                if chmod:
-                    chmod = False
-            else:
-                log("Scoreboard hasn't changed. Not uploading")
-
-            if freeze_at is not None:
-                td = freeze_at - datetime.now()
-                tds = td.total_seconds()
-
-                if tds < 0:
-                    break
-
-                if tds < (FREEZE_WARNING_MINUTES * 60):
-                    log("ATTENTION: The scoreboard will be frozen in %s" % td_str(td))
-
-            time.sleep(args.update)
         
         if freeze_at is not None:
             # Freeze the scoreboard
@@ -315,7 +464,18 @@ if __name__ == "__main__":
                   freeze = True,
                   freeze_message = config["freeze_message"],
                   suffix = None,
-                  chmod = chmod)
+                  chmod = False)
+
+            if sftp_ewteam is not None:
+                freeze_ewteam(sftp_ewteam, config["ewteam_scoreboard_url"], config["freeze_message"])
+
+        if args.freeze_suffix is not None:
+            log("Beginning upload to post-freeze suffix (%s)" % args.freeze_suffix)
+            upload_scoreboard_every(sftp_client = sftp_web,
+                                    files = scoreboard_files,
+                                    suffix = args.freeze_suffix,
+                                    freeze_at = None,
+                                    interval = args.update)
 
     else:
         print "ERROR: Update interval must be at least %i seconds" % MIN_UPDATE_INTERVAL

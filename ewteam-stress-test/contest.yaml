@@ -1,0 +1,44 @@
+accounts:
+  - account: TEAM
+    count: 160
+    site: 1
+  - account: JUDGE
+    count: 5
+    site: 1
+  - account: SCOREBOARD
+    count: 2
+    site: 1
+  - account: ADMINISTRATOR
+    count: 2
+    site: 1
+clar-categories:
+- General
+default-clars:
+- No response, read problem statement
+duration: '5:00:00'
+languages:
+-   active: true
+    compilerCmd: javac -encoding UTF-8 -sourcepath . -d . {:mainfile}
+    execCmd: java -client -Xss8m -Xmx2048m {:basename}
+    exemask: '{:basename}.class'
+    name: Java
+    runner: java
+    runner-args: -client -Xss8m -Xmx2048m {:basename}
+-   active: true
+    compilerCmd: gcc -g -O2 -std=gnu99 -static -o {:basename}.exe {:mainfile} -lm
+    execCmd: ./{:basename}.exe
+    exemask: '{:basename}.exe'
+    name: GNU C
+    runner: ./{:basename}.exe
+    runner-args: null
+-   active: true
+    compilerCmd: g++ -g -O2 -std=gnu++0x -static -o {:basename}.exe {:mainfile}
+    execCmd: ./{:basename}.exe
+    exemask: '{:basename}.exe'
+    name: GNU C++
+    runner: ./{:basename}.exe
+    runner-args: null
+name: EWTeam Stress Test
+scoreboard-freeze: '4:00:00'
+short-name: EWTeamStress
+
